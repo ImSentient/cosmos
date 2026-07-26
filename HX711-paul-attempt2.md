@@ -1,9 +1,9 @@
-# HX711S driver rewrite (paul/hx711s-new) — design, failures, fixes, validation
+# HX711S read-on-DRDY rewrite — design, failures, fixes, validation (attempt 2)
 
 Rewritten 2026-07-25/26 from james's `hx711s-new` branch (`413e9e38`).
 This doc covers the read-on-DRDY rewrite era. The previous stack's history
 (`paul/hx711-reliability`, iterations 1-5, original campaign) lives in
-`HX711.md`.
+`HX711-paul-attempt1.md`. Audit/background material: `HX711.md`.
 
 ## Goals for this version
 
