@@ -120,3 +120,25 @@ New tuning option: `settle_ms` (default derived from sample_rate). Full
 set_tuning signature: `torn_retries stuck_ms spike_sum_threshold
 settle_ms`. All commits build klipper.bin clean; on-device validation
 pending (Paul's call).
+
+## 2026-07-26 (night) — review round 3 fixes + full replay re-validation
+
+Three findings closed via rebase-edit; stack: `3554f486` / `b4578bac` /
+`1cdf9535` / `b5966b6e`.
+
+| Finding | Fix | Commit |
+|---|---|---|
+| probe watchdog starved during recovery (settle pre-delay = ~60ms unfed @80 SPS) | recovery re-arms timers at normal cadence after a 1ms power-up guard; the 4-conversion qualification discard absorbs false-edge frames safely; held-feed flows throughout | `b4578bac` |
+| healthy sibling reset recovery_streak, dead chip never escalated | streak resets only when have_counts == chip_mask (full requalification) | `b4578bac` |
+| opposite-sign spike confirmed the held one (+8000 then -8000 leaked the spike) | confirm direction taken from the PENDING jump, not the current delta | `b5966b6e` |
+
+Watchdog grace after recovery re-seeded to `waketime + settle_ticks` so
+it spans the full qualification window at any rate (`1cdf9535`).
+
+**Replay re-validation (197k-sample hx711s-new2 capture, updated filter):**
+- 0 phantom crossings survive (24 sub-50ms noise crossings removed,
+  including the 3 known trigger-class impulses)
+- 0 real taps lost (all 24 removed crossings were sub-50ms noise)
+- trigger latency uniform 1 sample (median 11.6ms, max 23.3ms)
+- synthetic opposite-sign pair (+76g then -76g): nothing leaks
+- genuine 80g step: confirmed with 1-sample latency
