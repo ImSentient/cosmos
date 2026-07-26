@@ -1,0 +1,214 @@
+From 9120d75c9c79c788f19f0023d67aece8b93e2e8f Mon Sep 17 00:00:00 2001
+From: pdscomp <pdscomp@local>
+Date: Sun, 26 Jul 2026 16:24:53 -0400
+Subject: [PATCH] Add MESH_SOAK beta tooling (mesh soak campaign data
+ collector)
+
+[mesh_soak] klippy module: MESH_SOAK NUM=<n> BED_TEMP=<t> runs N
+BED_MESH_CALIBRATE cycles (default 5), logging per-run success/failure,
+the hx711s tuning settings, and build version to klippy.log, capturing
+per-channel force samples via a new hx711s sample-listener hook, and
+bundling README (upload instructions), settings, results, force.jsonl
+and klippy.log into /user-resource/mesh-results-<ts>.tar.gz for
+community testers to attach to the kalico PR.
+---
+ klippy/extras/load_cell/hx711s.py |   9 ++
+ klippy/extras/mesh_soak.py        | 152 ++++++++++++++++++++++++++++++
+ 2 files changed, 161 insertions(+)
+ create mode 100644 klippy/extras/mesh_soak.py
+
+diff --git a/klippy/extras/load_cell/hx711s.py b/klippy/extras/load_cell/hx711s.py
+index 45ddcf47..fe3c8ac8 100644
+--- a/klippy/extras/load_cell/hx711s.py
++++ b/klippy/extras/load_cell/hx711s.py
+@@ -36,6 +36,7 @@ class HX711SBase(LoadCellSensor):
+         self.name = config.get_name().split()[-1]
+         self.last_error_count = 0
+         self.recovered_count = 0
++        self.sample_listeners = []
+         self.consecutive_fails = 0
+         self.sensor_type = sensor_type
+         self.bad_frame_count = 0
+@@ -160,6 +161,11 @@ class HX711SBase(LoadCellSensor):
+     def add_client(self, callback: BulkAdcDataCallback):
+         self.batch_bulk.add_client(callback)
+ 
++    # beta tooling hook (mesh_soak): listeners get the converted
++    # per-channel sample tuples after each batch
++    def add_sample_listener(self, callback):
++        self.sample_listeners.append(callback)
++
+     def attach_load_cell_probe(self, load_cell_probe_oid: int):
+         self.attach_probe_cmd.send([self.oid, load_cell_probe_oid])
+ 
+@@ -237,6 +243,9 @@ class HX711SBase(LoadCellSensor):
+         prev_bad_frames = self.bad_frame_count
+         samples = self.ffreader.pull_samples()
+         self._convert_samples(samples)
++        if self.sample_listeners:
++            for cb in self.sample_listeners:
++                cb(samples)
+         overflows = self.ffreader.get_last_overflows() - prev_overflows
+         errors = self.last_error_count - prev_error_count
+         # Report dropped samples once per batch rather than once each, so a
+diff --git a/klippy/extras/mesh_soak.py b/klippy/extras/mesh_soak.py
+new file mode 100644
+index 00000000..82cf7e62
+--- /dev/null
++++ b/klippy/extras/mesh_soak.py
+@@ -0,0 +1,152 @@
++# Beta tooling: run N bed meshes, capture force data, bundle for upload
++#
++# klippy/extras/mesh_soak.py
++#
++# [mesh_soak] in printer.cfg, then: MESH_SOAK [NUM=<n>] [BED_TEMP=<t>]
++import io, json, logging, os, tarfile, time
++
++README = """hx711s mesh soak results
++========================
++Printer build: %(version)s
++Runs: %(runs)s
++
++HOW TO UPLOAD
++1. Go to %(pr_url)s
++2. Drag this .tar.gz into a new comment
++3. Add your printer model, bed temp, and anything unusual you saw
++   (skips, retries, "Bad tap" messages, hotend blobs, etc.)
++
++THANK YOU for testing!
++"""
++
++class MeshSoak:
++    def __init__(self, config):
++        self.printer = config.get_printer()
++        self.gcode = self.printer.lookup_object('gcode')
++        self.out_dir = config.get('output_dir', '/user-resource')
++        self.pr_url = config.get('pr_url',
++            'https://github.com/OpenCentauri/kalico/pull/6')
++        self.hx = None
++        self.capture = None      # file handle while soaking
++        self.cbuf = []           # buffered sample lines
++        self.printer.register_event_handler('klippy:connect',
++                                            self._connect)
++        self.gcode.register_command(
++            'MESH_SOAK', self.cmd_MESH_SOAK,
++            desc="Run NUM bed meshes and bundle results for the PR")
++
++    def _connect(self):
++        # the sensor is not registered by name; reach it through the probe
++        probe = self.printer.lookup_object('load_cell_probe', None)
++        if probe is not None:
++            try:
++                self.hx = probe._load_cell.get_sensor()
++            except Exception:
++                self.hx = None
++        if self.hx is not None and hasattr(self.hx, 'add_sample_listener'):
++            self.hx.add_sample_listener(self._on_samples)
++
++    # capture runs on klippy's thread; buffer and flush in chunks
++    def _on_samples(self, batch):
++        if self.capture is None:
++            return
++        self.cbuf.append(json.dumps({'data': batch}) + '\n')
++        if len(self.cbuf) >= 40:
++            self.capture.writelines(self.cbuf)
++            self.cbuf = []
++
++    def _settings_text(self):
++        sa = self.printer.get_start_args()
++        lines = ['software_version: %s' % sa.get('software_version')]
++        # MCU firmware build IDs (SRCREV-PR), when present on the host
++        for mcu in ('bed', 'toolhead'):
++            try:
++                with open('/lib/firmware/klipper-%s.bin.ver' % mcu) as f:
++                    lines.append('klipper-%s.ver: %s' % (mcu, f.read().strip()))
++            except OSError:
++                pass
++        if self.hx is not None:
++            for k in ('torn_retries', 'stuck_ms', 'settle_ms',
++                      'spike_sum_threshold', 'sps', 'recovered_count'):
++                lines.append('%s: %s' % (k, getattr(self.hx, k, '?')))
++        return '\n'.join(lines) + '\n'
++
++    def cmd_MESH_SOAK(self, gcmd):
++        n = gcmd.get_int('NUM', 5, minval=1, maxval=50)
++        bed_temp = gcmd.get_int('BED_TEMP', 60, minval=0)
++        ts = time.strftime('%Y%m%d-%H%M%S')
++        # settings go to klippy.log too, so plain logs are useful on their own
++        settings = self._settings_text()
++        logging.info('MESH_SOAK start ts=%s n=%d bed_temp=%d\n%s',
++                     ts, n, bed_temp, settings)
++        cap_path = os.path.join(self.out_dir, 'mesh-soak-%s-force.jsonl' % ts)
++        try:
++            self.capture = open(cap_path, 'w')
++        except OSError:
++            cap_path = os.path.join('/tmp', os.path.basename(cap_path))
++            self.capture = open(cap_path, 'w')
++        results = []
++        try:
++            for i in range(1, n + 1):
++                if self.printer.is_shutdown():
++                    gcmd.respond_info('MESH_SOAK: printer shutdown, stopping')
++                    break
++                t0 = time.time()
++                try:
++                    if bed_temp:
++                        self.gcode.run_script_from_command(
++                            'M140 S%d\nM190 S%d' % (bed_temp, bed_temp))
++                    self.gcode.run_script_from_command('BED_MESH_CALIBRATE')
++                    rc, err = 'ok', ''
++                except Exception as e:
++                    rc, err = 'FAIL', str(e)
++                dur = time.time() - t0
++                results.append((i, rc, dur, err))
++                gcmd.respond_info('MESH_SOAK run %d/%d: %s (%.0fs) %s'
++                                  % (i, n, rc, dur, err))
++                logging.info('MESH_SOAK run %d/%d: %s %.1fs %s',
++                             i, n, rc, dur, err)
++                if bed_temp:
++                    try:
++                        self.gcode.run_script_from_command('M140 S0')
++                    except Exception:
++                        pass
++        finally:
++            if self.cbuf:
++                self.capture.writelines(self.cbuf)
++                self.cbuf = []
++            self.capture.close()
++            self.capture = None
++        out = self._bundle(ts, settings, results, cap_path, gcmd)
++        gcmd.respond_info('MESH_SOAK complete: %s' % out)
++
++    def _bundle(self, ts, settings, results, cap_path, gcmd):
++        version = self.printer.get_start_args().get('software_version')
++        rtxt = ''.join('run %d: %s %.1fs %s\n' % r for r in results)
++        readme = README % {'version': version, 'runs': rtxt,
++                           'pr_url': self.pr_url}
++        name = 'mesh-results-%s.tar.gz' % ts
++        for d in (self.out_dir, '/tmp'):
++            out_path = os.path.join(d, name)
++            try:
++                with tarfile.open(out_path, 'w:gz') as tar:
++                    for fname, text in (('README.txt', readme),
++                                        ('settings.txt', settings),
++                                        ('results.txt', rtxt)):
++                        info = tarfile.TarInfo(fname)
++                        data = text.encode()
++                        info.size = len(data)
++                        tar.addfile(info, io.BytesIO(data))
++                    tar.add(cap_path, arcname='force.jsonl')
++                    log_file = self.printer.get_start_args().get('log_file')
++                    if log_file and os.path.exists(log_file):
++                        tar.add(log_file, arcname='klippy.log')
++                os.unlink(cap_path)
++                return out_path
++            except OSError as e:
++                gcmd.respond_info('MESH_SOAK: cannot write %s: %s'
++                                  % (out_path, e))
++        return 'FAILED to write bundle (see log)'
++
++def load_config(config):
++    return MeshSoak(config)
+-- 
+2.47.3
+

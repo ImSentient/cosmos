@@ -142,3 +142,32 @@ it spans the full qualification window at any rate (`1cdf9535`).
 - trigger latency uniform 1 sample (median 11.6ms, max 23.3ms)
 - synthetic opposite-sign pair (+76g then -76g): nothing leaks
 - genuine 80g step: confirmed with 1-sample latency
+
+## 2026-07-26 (late night) — 6-run validation + MESH_SOAK beta tooling
+
+**Validation on b5966b6e (r21, all 3 MCUs banner-verified):** 6/6 full
+31-point BED_MESH_CALIBRATE @60C completed clean. Zero Bad taps, zero
+retries, zero recoveries, zero desyncs, zero bad frames across the whole
+campaign (43MB force capture archived to hx711s-new3-artifacts/).
+
+**Flash gotchas learned (now in cosmos skill):** never flash twice on
+the same boot (second swupdate dies silently at network_initializer,
+rc=1); the bed MCU boot-time reflash can FALSE-SUCCEED (records
+/etc/bed.ver, MCU keeps old binary) -- always verify the `Loaded MCU`
+banner, not just .ver files. Force a reflash by writing the old version
+into /etc/<mcu>.ver and restarting the klipper-firmware-<mcu> service.
+
+**MESH_SOAK beta tooling** (`0004-Add-MESH_SOAK-beta-tooling.patch`,
+cosmos tree not the kalico branch): `[mesh_soak]` klippy module ships
+`MESH_SOAK NUM=<n> BED_TEMP=<t>` (default 5/60) -- runs N
+BED_MESH_CALIBRATE cycles, logs per-run ok/FAIL + duration + the four
+tunables + software/MCU build IDs to klippy.log, captures per-channel
+force samples via a new hx711s `add_sample_listener` hook (4 lines),
+and bundles README (drag-into-PR-comment instructions), settings.txt,
+results.txt, force.jsonl, klippy.log into
+/user-resource/mesh-results-<ts>.tar.gz. Survives per-run probe
+failures; breaks early on printer shutdown (gilfoyle fix). Smoke-tested
+on carbon2u: bundle produced, contents verified. machine.cfg in the
+image carries a default `[mesh_soak]` section so testers need zero
+config. Sensor lookup reaches through `probe._load_cell.get_sensor()`
+(sensor_class is instantiated, not registered by name).
