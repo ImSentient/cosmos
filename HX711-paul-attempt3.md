@@ -101,3 +101,22 @@ Gilfoyle audit findings, all fixed via rebase-edit amends:
   `impulse_threshold_counts < trigger_force x counts_per_gram` rule.
 
 Docs updated; no push (new3 stays local until Paul says otherwise).
+
+## 2026-07-26 (late) — external review fixes (6 findings, rebase-edits)
+
+Second review pass (6 findings) closed via rebase-edit amends; stack is
+still 4 commits: `3554f486` / `b24e23a6` / `e79848fd` / `e923087a`.
+
+| Finding | Fix | Commit |
+|---|---|---|
+| 50ms settle wrong at 10 SPS (datasheet 400ms); post-cycle first read is reset-default A-128 | rate-aware `settle_ticks` (4 conversions + margin) + consume-and-discard first 4 conversions after wake (also covers gain-select programming) | `b24e23a6` |
+| bad_frame chips feed stale mixed-age sums to the probe | bad-frame streak >2 -> recovery (bounded hold instead of infinite; rejected fail-move: transient faults must not nuke prints) | `b24e23a6` |
+| stuck-low DOUT: infinite benign retries + liveness refresh = watchdog never fires | bad-streak -> recovery; recovery streak >3 -> fatal DESYNC latch (honest end-state for a dead chip) | `b24e23a6` |
+| fixed 50ms pause aborts HX717 320 SPS homing (watchdog ~16ms) | same rate-aware settle: 4 periods at 320 SPS = 12.5ms | `b24e23a6` |
+| capture task only woken on pending; watchdog unenforced when no chip presents DRDY | wake task on every chip event (also lets the recovery held-feed run during settle) | `e79848fd` |
+| host `break` on RECOVERED marker dropped valid batch tail | `continue` | `b24e23a6` |
+
+New tuning option: `settle_ms` (default derived from sample_rate). Full
+set_tuning signature: `torn_retries stuck_ms spike_sum_threshold
+settle_ms`. All commits build klipper.bin clean; on-device validation
+pending (Paul's call).
