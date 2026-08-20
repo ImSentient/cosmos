@@ -46,7 +46,8 @@ CORE_IMAGE_EXTRA_INSTALL += "\
     iproute2 \
     chrony \
     afc \
-    tmc-autotune \ 
+    tmc-autotune \
+    wireguard-tools \
 "
 
 INITRAMFS_IMAGE = "core-image-tiny-initramfs"
